@@ -652,46 +652,43 @@ async function play(params, context) {
     const { account, itemId } = parseId(rawPlayId);
     const { userId, baseUrl, authHeader, token } = await jellyfinLogin(account);
 
-    // 方案一：先尝试通过 PlaybackInfo 获取直链
+    // 方案一：静态流（不转码，Jellyfin/Emby 通用）
     try {
-      const url = `${baseUrl}/emby/Items/${itemId}/PlaybackInfo?UserId=${encodeURIComponent(userId)}&IsPlayback=false&AutoOpenLiveStream=false`;
-      const result = await requestJson(
-        url,
-        {
-          method: "POST",
-          data: DEVICE_PROFILE,
-        },
-        authHeader
-      );
-
-      const mediaSource = result?.MediaSources?.[0];
-      if (mediaSource?.DirectStreamUrl) {
-        let playUrl = mediaSource.DirectStreamUrl;
-        if (playUrl.startsWith("/")) {
-          playUrl = `${baseUrl}${playUrl}`;
-        }
-        logInfo("播放地址获取成功 (PlaybackInfo)");
+      const staticUrl = `${baseUrl}/emby/Videos/${itemId}/stream?Static=true&api_key=${token}`;
+      logInfo("播放地址 (静态流)", { url: staticUrl.substring(0, 80) });
+      const test = await axiosInstance.head(staticUrl, {
+        headers: { "X-Emby-Authorization": authHeader },
+        timeout: 3000,
+      });
+      if (test.status >= 200 && test.status < 400) {
         return {
           parse: 0,
-          urls: [{ name: "播放", url: playUrl }],
+          urls: [{ name: "播放", url: staticUrl }],
           flag: "Jellyfin",
           header: { Referer: `${baseUrl}/` },
         };
       }
     } catch (e) {
-      logError("PlaybackInfo 方式获取播放地址失败", e);
+      logError("静态流不可用，回退 PlaybackInfo", e);
     }
 
-    // 方案二：直接构造静态流地址（Jellyfin 常用）
-    const staticUrl = `${baseUrl}/emby/Videos/${itemId}/stream?Static=true&api_key=${token}`;
-    logInfo("播放地址 (静态流)", { url: staticUrl.substring(0, 80) });
+    // 方案二：PlaybackInfo 降级兜底
+    const piUrl = `${baseUrl}/emby/Items/${itemId}/PlaybackInfo?UserId=${encodeURIComponent(userId)}&IsPlayback=false&AutoOpenLiveStream=false`;
+    const result = await requestJson(piUrl, { method: "POST", data: DEVICE_PROFILE }, authHeader);
+    const mediaSource = result?.MediaSources?.[0];
+    if (mediaSource?.DirectStreamUrl) {
+      let playUrl = mediaSource.DirectStreamUrl;
+      if (playUrl.startsWith("/")) playUrl = `${baseUrl}${playUrl}`;
+      logInfo("播放地址获取成功 (PlaybackInfo)");
+      return {
+        parse: 0,
+        urls: [{ name: "播放", url: playUrl }],
+        flag: "Jellyfin",
+        header: { Referer: `${baseUrl}/` },
+      };
+    }
 
-    return {
-      parse: 0,
-      urls: [{ name: "播放", url: staticUrl }],
-      flag: "Jellyfin",
-      header: { Referer: `${baseUrl}/` },
-    };
+    throw new Error("无可用播放地址");
   } catch (e) {
     logError("播放解析失败", e);
     return {
